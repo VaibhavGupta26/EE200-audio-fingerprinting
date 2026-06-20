@@ -295,69 +295,31 @@ elif mode == "Single-Clip Mode":
 # --- BATCH RUNNING MODE ---
 elif mode == "Batch Mode":
     st.title("📂 Batch Song Identification")
-    st.markdown("Run batch classification on multiple query clips. You can upload multiple audio files, or select a list of database songs and auto-generate test queries for them.")
+    st.markdown("Run batch classification on multiple query clips. You can upload multiple files from your device, or select from the preloaded query clips in the repository.")
     
-    batch_input_type = st.radio("Choose Batch Method:", ["Test using Database Songs (Auto-generate queries)", "Upload multiple query files"])
+    batch_input_type = st.radio("Choose Batch Method:", ["Select preloaded Query Clips (from repository)", "Upload custom query files"])
     
     results = []
     
-    if batch_input_type == "Test using Database Songs (Auto-generate queries)":
-        if not indexed_songs:
-            st.error("No songs indexed in the database. Please check your data/songs directory.")
-        else:
-            selected_batch_songs = st.multiselect("Select Songs to Test:", indexed_songs, default=indexed_songs[:5])
+    if batch_input_type == "Select preloaded Query Clips (from repository)":
+        queries_dir = os.path.join(PROJECT_ROOT, "data", "queries")
+        preloaded_queries = []
+        if os.path.exists(queries_dir):
+            preloaded_queries = sorted([f for f in os.listdir(queries_dir) if f.endswith(".wav")])
             
-            # Param sliders
-            col_x, col_y, col_z = st.columns(3)
-            with col_x:
-                batch_dur = st.slider("Query Duration (seconds):", 3.0, 15.0, 5.0, 0.5, key="batch_dur")
-            with col_y:
-                batch_noise_flag = st.checkbox("Inject Noise (AWGN)", key="batch_noise")
-                batch_snr = st.slider("SNR Level (dB):", -10, 30, 10, disabled=not batch_noise_flag, key="batch_snr")
-            with col_z:
-                batch_pitch_flag = st.checkbox("Shift Pitch/Speed (Resampling)", key="batch_pitch")
-                batch_shift = st.slider("Pitch/Speed Shift (%):", -5.0, 5.0, 0.0, 0.5, disabled=not batch_pitch_flag, key="batch_shift")
-                
-            if st.button("🚀 Run Batch Test"):
+        if not preloaded_queries:
+            st.error("No preloaded query clips found in data/queries/ directory. Ensure they are pushed to GitHub.")
+        else:
+            # Dropdown multiselect
+            selected_queries = st.multiselect("Select Query Clips to Test (up to 50):", preloaded_queries, default=preloaded_queries[:5])
+            
+            if st.button("🚀 Run Batch Classification"):
                 progress_bar = st.progress(0)
                 
-                for i, song_name in enumerate(selected_batch_songs):
-                    song_filename = None
-                    for ext in [".mp3", ".wav"]:
-                        test_name = f"{song_name}{ext}"
-                        if os.path.exists(os.path.join(SONGS_DIR, test_name)):
-                            song_filename = test_name
-                            break
-                            
-                    if song_filename is None:
-                        results.append({
-                            "filename": f"{song_name}_query.wav",
-                            "prediction": "error: song file not found"
-                        })
-                        continue
-                        
-                    song_path = os.path.join(SONGS_DIR, song_filename)
-                    query_audio = generate_test_query(
-                        song_path, 
-                        duration=batch_dur, 
-                        sr=11025, 
-                        noise_db=batch_snr if batch_noise_flag else None, 
-                        pitch_percent=batch_shift if batch_pitch_flag else 0.0
-                    )
-                    
-                    if query_audio is None:
-                        results.append({
-                            "filename": f"{song_name}_query.wav",
-                            "prediction": "error: loading failed"
-                        })
-                        continue
-                        
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-                        sf.write(tmp_file.name, query_audio, 11025)
-                        tmp_path = tmp_file.name
-                        
+                for i, q_filename in enumerate(selected_queries):
+                    q_path = os.path.join(queries_dir, q_filename)
                     try:
-                        pred, _, _, _ = match_query(tmp_path, db_path=DB_PATH, mode="paired", sr=11025)
+                        pred, _, _, _ = match_query(q_path, db_path=DB_PATH, mode="paired", sr=11025)
                         
                         # Format prediction (matched song name without extension)
                         if pred == "Unknown / No Match":
@@ -366,19 +328,16 @@ elif mode == "Batch Mode":
                             pred_name = pred
                             
                         results.append({
-                            "filename": f"{song_name}_query.wav",
+                            "filename": q_filename,
                             "prediction": pred_name
                         })
                     except Exception as e:
                         results.append({
-                            "filename": f"{song_name}_query.wav",
+                            "filename": q_filename,
                             "prediction": f"error: {str(e)}"
                         })
-                    finally:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                            
-                    progress_bar.progress((i + 1) / len(selected_batch_songs))
+                        
+                    progress_bar.progress((i + 1) / len(selected_queries))
                     
                 df = pd.DataFrame(results)
                 st.success("Batch run complete!")
@@ -391,6 +350,7 @@ elif mode == "Batch Mode":
                     file_name="results.csv",
                     mime="text/csv"
                 )
+                st.info("The downloaded CSV follows the exact header formatting required by the grader.")
                 
     else:
         uploaded_files = st.file_uploader(
