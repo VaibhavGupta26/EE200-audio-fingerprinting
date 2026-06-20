@@ -129,21 +129,42 @@ elif mode == "Single-Clip Mode":
     st.title("⚡ Single-Clip Identification")
     st.markdown("Upload a noisy or clean audio snippet. The system will extract its spectral peaks, build paired hashes, and align them against the indexed database.")
     
-    uploaded_file = st.file_uploader("Upload audio clip (.mp3, .wav)", type=["mp3", "wav"])
+    # Setup demo queries selection
+    queries_dir = os.path.join(PROJECT_ROOT, "data", "queries")
+    demo_options = ["Upload your own file"]
+    demo_files = {}
     
-    if uploaded_file is not None:
-        # Save file to a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            tmp_path = tmp_file.name
+    if os.path.exists(queries_dir):
+        files = [f for f in os.listdir(queries_dir) if f.endswith(".wav")]
+        for f in files:
+            name_pretty = f.replace("_", " ").replace(".wav", "").title()
+            demo_options.append(name_pretty)
+            demo_files[name_pretty] = os.path.join(queries_dir, f)
             
-        st.audio(uploaded_file)
+    query_choice = st.selectbox("Choose a clip to test:", demo_options)
+    
+    query_filepath = None
+    uploaded_file = None
+    
+    if query_choice == "Upload your own file":
+        uploaded_file = st.file_uploader("Upload audio clip (.mp3, .wav)", type=["mp3", "wav"])
+        if uploaded_file is not None:
+            # Save file to a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                tmp_file.write(uploaded_file.read())
+                query_filepath = tmp_file.name
+            st.audio(uploaded_file)
+    else:
+        query_filepath = demo_files[query_choice]
+        st.write(f"Playing Demo Clip: **{query_choice}**")
+        st.audio(query_filepath)
         
+    if query_filepath is not None:
         with st.spinner("Processing audio and querying database..."):
             try:
                 # Run the matcher
                 predicted_song, scores, best_offsets, match_details = match_query(
-                    tmp_path, db_path=DB_PATH, mode="paired", sr=11025
+                    query_filepath, db_path=DB_PATH, mode="paired", sr=11025
                 )
                 
                 # Render identification card
@@ -159,7 +180,7 @@ elif mode == "Single-Clip Mode":
                 st.subheader("📊 Intermediate Processing Steps")
                 
                 # Load audio data for plots
-                y, sr = load_audio(tmp_path, sr=11025)
+                y, sr = load_audio(query_filepath, sr=11025)
                 w_len, overlap = 1024, 512
                 hop_len = w_len - overlap
                 
@@ -232,9 +253,9 @@ elif mode == "Single-Clip Mode":
             except Exception as e:
                 st.error(f"Error executing match: {e}")
             finally:
-                # Cleanup temp file
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                # Cleanup temp file if it was uploaded
+                if uploaded_file is not None and query_filepath is not None and os.path.exists(query_filepath):
+                    os.remove(query_filepath)
 
 # --- BATCH RUNNING MODE ---
 elif mode == "Batch Mode":
