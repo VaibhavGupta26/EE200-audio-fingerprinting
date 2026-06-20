@@ -1,19 +1,20 @@
 import os
 import sys
 import tempfile
-
-# Add project root directory to path to allow resolution of 'src'
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import soundfile as sf
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import Counter
 
+# Add project root directory to path to allow resolution of 'src'
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from src.spectrogram import load_audio, compute_spectrogram
 from src.fingerprint import get_peaks, build_database
 from src.matcher import match_query
+from src.robustness import generate_test_query
 
 # Configure Streamlit page
 st.set_page_config(
@@ -127,38 +128,72 @@ if mode == "Database Info":
 # --- SINGLE-CLIP IDENTIFICATION MODE ---
 elif mode == "Single-Clip Mode":
     st.title("⚡ Single-Clip Identification")
-    st.markdown("Upload a noisy or clean audio snippet. The system will extract its spectral peaks, build paired hashes, and align them against the indexed database.")
+    st.markdown("Identify songs from short clips. You can upload an audio file or select any song from the database and customize noise injection/pitch shifts to test the system.")
     
-    # Setup demo queries selection
-    queries_dir = os.path.join(PROJECT_ROOT, "data", "queries")
-    demo_options = ["Upload your own file"]
-    demo_files = {}
-    
-    if os.path.exists(queries_dir):
-        files = [f for f in os.listdir(queries_dir) if f.endswith(".wav")]
-        for f in files:
-            name_pretty = f.replace("_", " ").replace(".wav", "").title()
-            demo_options.append(name_pretty)
-            demo_files[name_pretty] = os.path.join(queries_dir, f)
-            
-    query_choice = st.selectbox("Choose a clip to test:", demo_options)
+    input_type = st.radio("Choose Input Method:", ["Generate query from Database Song", "Upload custom audio file"])
     
     query_filepath = None
     uploaded_file = None
+    is_temp_file = False
     
-    if query_choice == "Upload your own file":
+    if input_type == "Generate query from Database Song":
+        if not indexed_songs:
+            st.error("No songs indexed in the database. Please check your data/songs directory.")
+        else:
+            selected_song = st.selectbox("Select Database Song:", indexed_songs)
+            
+            # Param sliders
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                duration = st.slider("Query Duration (seconds):", 3.0, 15.0, 5.0, 0.5)
+            with col_b:
+                add_noise_flag = st.checkbox("Inject Noise (AWGN)")
+                snr = st.slider("SNR Level (dB):", -10, 30, 10, disabled=not add_noise_flag)
+            with col_c:
+                add_pitch_flag = st.checkbox("Shift Pitch/Speed (Resampling)")
+                shift = st.slider("Pitch/Speed Shift (%):", -5.0, 5.0, 0.0, 0.5, disabled=not add_pitch_flag)
+                
+            if st.button("⚡ Generate & Identify"):
+                # Find corresponding original file (mp3 or wav)
+                song_filename = None
+                for ext in [".mp3", ".wav"]:
+                    test_name = f"{selected_song}{ext}"
+                    if os.path.exists(os.path.join(SONGS_DIR, test_name)):
+                        song_filename = test_name
+                        break
+                        
+                if song_filename is None:
+                    st.error(f"Original audio file for '{selected_song}' not found in data/songs/. Ensure database files are pushed to GitHub.")
+                else:
+                    song_path = os.path.join(SONGS_DIR, song_filename)
+                    with st.spinner("Extracting slice and injecting distortions..."):
+                        query_audio = generate_test_query(
+                            song_path, 
+                            duration=duration, 
+                            sr=11025, 
+                            noise_db=snr if add_noise_flag else None, 
+                            pitch_percent=shift if add_pitch_flag else 0.0
+                        )
+                        if query_audio is not None:
+                            # Save query to a temp file
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                                sf.write(tmp_file.name, query_audio, 11025)
+                                query_filepath = tmp_file.name
+                                is_temp_file = True
+                            st.write(f"Generated query from **{selected_song}**:")
+                            st.audio(query_filepath)
+                        else:
+                            st.error("Failed to load original song or slice. Verify audio decoding libraries.")
+                            
+    else:
         uploaded_file = st.file_uploader("Upload audio clip (.mp3, .wav)", type=["mp3", "wav"])
         if uploaded_file is not None:
-            # Save file to a temporary file
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
                 tmp_file.write(uploaded_file.read())
                 query_filepath = tmp_file.name
+                is_temp_file = True
             st.audio(uploaded_file)
-    else:
-        query_filepath = demo_files[query_choice]
-        st.write(f"Playing Demo Clip: **{query_choice}**")
-        st.audio(query_filepath)
-        
+            
     if query_filepath is not None:
         with st.spinner("Processing audio and querying database..."):
             try:
@@ -253,75 +288,161 @@ elif mode == "Single-Clip Mode":
             except Exception as e:
                 st.error(f"Error executing match: {e}")
             finally:
-                # Cleanup temp file if it was uploaded
-                if uploaded_file is not None and query_filepath is not None and os.path.exists(query_filepath):
+                # Cleanup temp file
+                if is_temp_file and query_filepath is not None and os.path.exists(query_filepath):
                     os.remove(query_filepath)
 
 # --- BATCH RUNNING MODE ---
 elif mode == "Batch Mode":
     st.title("📂 Batch Song Identification")
-    st.markdown("Upload multiple query clips at once. The app will process each clip and export a standardized `results.csv` containing the predictions.")
+    st.markdown("Run batch classification on multiple query clips. You can upload multiple audio files, or select a list of database songs and auto-generate test queries for them.")
     
-    uploaded_files = st.file_uploader(
-        "Upload set of query clips (.mp3, .wav)", 
-        type=["mp3", "wav"], 
-        accept_multiple_files=True
-    )
+    batch_input_type = st.radio("Choose Batch Method:", ["Test using Database Songs (Auto-generate queries)", "Upload multiple query files"])
     
-    if uploaded_files:
-        st.write(f"Loaded {len(uploaded_files)} files. Press run to identify them.")
-        
-        if st.button("🚀 Run Batch Classification"):
-            results = []
-            progress_bar = st.progress(0)
+    results = []
+    
+    if batch_input_type == "Test using Database Songs (Auto-generate queries)":
+        if not indexed_songs:
+            st.error("No songs indexed in the database. Please check your data/songs directory.")
+        else:
+            selected_batch_songs = st.multiselect("Select Songs to Test:", indexed_songs, default=indexed_songs[:5])
             
-            for i, up_file in enumerate(uploaded_files):
-                # Write to temp file
-                ext = os.path.splitext(up_file.name)[1]
-                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
-                    tmp_file.write(up_file.read())
-                    tmp_path = tmp_file.name
-                    
-                try:
-                    # Run matcher
-                    pred, scores, _, _ = match_query(tmp_path, db_path=DB_PATH, mode="paired", sr=11025)
-                    
-                    # Ensure prediction represents ONLY the filename without extension
-                    if pred == "Unknown / No Match":
-                        pred_name = "unknown"
-                    else:
-                        pred_name = pred # Already holds the base song name from the DB
-                        
-                    results.append({
-                        "filename": up_file.name,
-                        "prediction": pred_name
-                    })
-                except Exception as e:
-                    results.append({
-                        "filename": up_file.name,
-                        "prediction": f"error: {str(e)}"
-                    })
-                finally:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                        
-                # Update progress
-                progress_bar.progress((i + 1) / len(uploaded_files))
+            # Param sliders
+            col_x, col_y, col_z = st.columns(3)
+            with col_x:
+                batch_dur = st.slider("Query Duration (seconds):", 3.0, 15.0, 5.0, 0.5, key="batch_dur")
+            with col_y:
+                batch_noise_flag = st.checkbox("Inject Noise (AWGN)", key="batch_noise")
+                batch_snr = st.slider("SNR Level (dB):", -10, 30, 10, disabled=not batch_noise_flag, key="batch_snr")
+            with col_z:
+                batch_pitch_flag = st.checkbox("Shift Pitch/Speed (Resampling)", key="batch_pitch")
+                batch_shift = st.slider("Pitch/Speed Shift (%):", -5.0, 5.0, 0.0, 0.5, disabled=not batch_pitch_flag, key="batch_shift")
                 
-            # Create DataFrame
-            df = pd.DataFrame(results)
+            if st.button("🚀 Run Batch Test"):
+                progress_bar = st.progress(0)
+                
+                for i, song_name in enumerate(selected_batch_songs):
+                    song_filename = None
+                    for ext in [".mp3", ".wav"]:
+                        test_name = f"{song_name}{ext}"
+                        if os.path.exists(os.path.join(SONGS_DIR, test_name)):
+                            song_filename = test_name
+                            break
+                            
+                    if song_filename is None:
+                        results.append({
+                            "filename": f"{song_name}_query.wav",
+                            "prediction": "error: song file not found"
+                        })
+                        continue
+                        
+                    song_path = os.path.join(SONGS_DIR, song_filename)
+                    query_audio = generate_test_query(
+                        song_path, 
+                        duration=batch_dur, 
+                        sr=11025, 
+                        noise_db=batch_snr if batch_noise_flag else None, 
+                        pitch_percent=batch_shift if batch_pitch_flag else 0.0
+                    )
+                    
+                    if query_audio is None:
+                        results.append({
+                            "filename": f"{song_name}_query.wav",
+                            "prediction": "error: loading failed"
+                        })
+                        continue
+                        
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                        sf.write(tmp_file.name, query_audio, 11025)
+                        tmp_path = tmp_file.name
+                        
+                    try:
+                        pred, _, _, _ = match_query(tmp_path, db_path=DB_PATH, mode="paired", sr=11025)
+                        
+                        # Format prediction (matched song name without extension)
+                        if pred == "Unknown / No Match":
+                            pred_name = "unknown"
+                        else:
+                            pred_name = pred
+                            
+                        results.append({
+                            "filename": f"{song_name}_query.wav",
+                            "prediction": pred_name
+                        })
+                    except Exception as e:
+                        results.append({
+                            "filename": f"{song_name}_query.wav",
+                            "prediction": f"error: {str(e)}"
+                        })
+                    finally:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                            
+                    progress_bar.progress((i + 1) / len(selected_batch_songs))
+                    
+                df = pd.DataFrame(results)
+                st.success("Batch run complete!")
+                st.dataframe(df)
+                
+                csv_data = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download results.csv",
+                    data=csv_data,
+                    file_name="results.csv",
+                    mime="text/csv"
+                )
+                
+    else:
+        uploaded_files = st.file_uploader(
+            "Upload set of query clips (.mp3, .wav)", 
+            type=["mp3", "wav"], 
+            accept_multiple_files=True
+        )
+        
+        if uploaded_files:
+            st.write(f"Loaded {len(uploaded_files)} files. Press run to identify them.")
             
-            # Display results preview
-            st.success("Batch run complete!")
-            st.dataframe(df)
-            
-            # Export to EXACT format (results.csv: filename,prediction)
-            csv_data = df.to_csv(index=False).encode('utf-8')
-            
-            st.download_button(
-                label="📥 Download results.csv",
-                data=csv_data,
-                file_name="results.csv",
-                mime="text/csv"
-            )
-            st.info("The downloaded CSV follows the exact header formatting required by the grader.")
+            if st.button("🚀 Run Batch Classification"):
+                progress_bar = st.progress(0)
+                
+                for i, up_file in enumerate(uploaded_files):
+                    ext = os.path.splitext(up_file.name)[1]
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
+                        tmp_file.write(up_file.read())
+                        tmp_path = tmp_file.name
+                        
+                    try:
+                        pred, _, _, _ = match_query(tmp_path, db_path=DB_PATH, mode="paired", sr=11025)
+                        
+                        if pred == "Unknown / No Match":
+                            pred_name = "unknown"
+                        else:
+                            pred_name = pred
+                            
+                        results.append({
+                            "filename": up_file.name,
+                            "prediction": pred_name
+                        })
+                    except Exception as e:
+                        results.append({
+                            "filename": up_file.name,
+                            "prediction": f"error: {str(e)}"
+                        })
+                    finally:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                            
+                    progress_bar.progress((i + 1) / len(uploaded_files))
+                    
+                df = pd.DataFrame(results)
+                st.success("Batch run complete!")
+                st.dataframe(df)
+                
+                csv_data = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download results.csv",
+                    data=csv_data,
+                    file_name="results.csv",
+                    mime="text/csv"
+                )
+                st.info("The downloaded CSV follows the exact header formatting required by the grader.")
