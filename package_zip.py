@@ -9,13 +9,19 @@ def create_submission_zip(zip_name="submission.zip"):
         "src/fingerprint.py",
         "src/matcher.py",
         "src/robustness.py",
-        "generate_report.py",
         "requirements.txt",
         "README.md",
         "database.pkl",
-        "report/Q3_report.pdf"
+        "packages.txt"
     ]
     
+    # Dynamically find all demo query clips to include
+    queries_dir = "data/queries"
+    if os.path.exists(queries_dir):
+        for f in os.listdir(queries_dir):
+            if f.endswith(".wav"):
+                include_paths.append(os.path.join(queries_dir, f))
+                
     print(f"Creating submission zip: {zip_name}...")
     
     with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
